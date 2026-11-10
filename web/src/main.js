@@ -5,6 +5,7 @@ import { keepPosing, startPosing } from './domain/poses.js';
 import { TextureLibrary } from './domain/textures.js';
 import { Wardrobe } from './domain/wardrobe.js';
 import { renderActions } from './ui/action-grid.js';
+import { setupExportDialog } from './ui/export-dialog.js';
 import { renderWardrobe } from './ui/wardrobe-panel.js';
 
 const STORAGE_KEY = 'buddyrevival';
@@ -21,7 +22,7 @@ await loadLanguage();
 const labels = {
   'tab-wardrobe': 'Customize Appearance', 'tab-moods': 'Change Mood', 'tab-pokes': 'Poke a Friend',
   'label-me': 'You', 'label-friend': 'Friend', 'reset': 'Default', 'randomize': 'Random',
-  'label-code': 'Buddy code', 'copy': 'Copy', 'apply': 'Apply',
+  'label-code': 'Buddy code', 'copy': 'Copy', 'apply': 'Apply', 'export': 'Save as video or GIF',
 };
 for (const [id, text] of Object.entries(labels)) $(id).textContent = t(text);
 
@@ -70,7 +71,47 @@ for (const buddy of Object.values(buddies)) startPosing(buddy);
 let mode = 'wardrobe';
 let editing = 'me';
 let redrawWardrobe = () => {};
+let paused = false;
+let exportable = null;
+let describe = null;
 const caption = message => { $('caption').textContent = message; };
+
+// Names typed in the export dialog replace "You" and "Friend" in captions.
+const names = () => ({ me: saved.names?.me ?? '', friend: saved.names?.friend ?? '' });
+const nameOf = who => names()[who].trim() || t(who === 'me' ? 'You' : 'Friend');
+const showDescription = () => { if (describe) caption(describe()); };
+
+// What the export dialog records: the mood or poke currently on screen, one loop of it.
+const clipOf = ({ name, scene, camera, actors, template }) => {
+  const animation = actors[0].animation;
+  if (!animation) return null;
+  return {
+    name,
+    scene,
+    camera,
+    names: names(),
+    hasFriend: actors.length > 1,
+    describe: ({ me, friend }) => template.replace('%1', me.trim() || t('You')).replace('%2', friend.trim() || t('Friend')).replace('%', me.trim() || t('You')),
+    frameCount: Math.max(1, animation.frameCount - 1),
+    showFrame: frame => actors.forEach(actor => actor.showFrame(frame)),
+  };
+};
+
+const openExport = setupExportDialog($('export-dialog'), {
+  source: () => exportable?.(),
+  pause: pause => {
+    paused = pause;
+    if (!pause) for (const buddy of Object.values(buddies)) buddy.animation?.reset();
+  },
+  rename: typed => {
+    saved.names = typed;
+    try {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(saved));
+    } catch {}
+    showDescription();
+  },
+});
+$('export').onclick = openExport;
 
 async function save(who) {
   saved[who] = await wardrobe.codeOf(buddies[who]);
@@ -87,6 +128,7 @@ async function customize(who) {
   buddy.camera = buddy.scene.node(EXAMINE_CAMERA);
   buddy.play('pose_contra');
   canvas.classList.add('examine');
+  describe = null;
   caption(t('click and drag your mouse to rotate'));
   $('code').value = saved[who] ?? await wardrobe.codeOf(buddy);
   redrawWardrobe = await renderWardrobe($('wardrobe'), wardrobe, buddy, () => save(who));
@@ -96,14 +138,18 @@ function showMood(mood) {
   mode = 'mood';
   buddies.me.camera = null;
   buddies.me.play(mood.animation, { loop: true });
-  caption(t(mood.caption).replace('%', t('You')));
+  describe = () => t(mood.caption).replace('%', nameOf('me'));
+  showDescription();
+  exportable = () => clipOf({ name: mood.name, scene: buddies.me.scene, camera: buddies.me.camera, actors: [buddies.me], template: t(mood.caption) });
 }
 
 function showPoke(poke) {
   mode = 'poke';
   buddies.me.play(poke.animations[0], { loop: true });
   buddies.friend.play(poke.animations[1], { loop: true });
-  caption(t(poke.caption).replace('%1', t('You')).replace('%2', t('Friend')));
+  describe = () => t(poke.caption).replace('%1', nameOf('me')).replace('%2', nameOf('friend'));
+  showDescription();
+  exportable = () => clipOf({ name: poke.name, scene: stage.scene, camera: stage.renderer.camera, actors: [buddies.me, buddies.friend], template: t(poke.caption) });
 }
 
 const tabs = { wardrobe: 'tab-wardrobe', mood: 'tab-moods', poke: 'tab-pokes' };
@@ -113,6 +159,7 @@ async function selectTab(name) {
     $($(id).getAttribute('aria-controls')).hidden = key !== name;
   }
   canvas.classList.toggle('examine', name === 'wardrobe');
+  $('export').hidden = name === 'wardrobe';
   if (name === 'wardrobe') await customize(editing);
   if (name === 'mood') $('moods').querySelector('button')?.click();
   if (name === 'poke') $('pokes').querySelector('button')?.click();
@@ -163,6 +210,7 @@ canvas.onpointermove = event => {
 await customize('me');
 
 (function frame() {
+  if (paused) return requestAnimationFrame(frame);
   g.clearRect(0, 0, width, height);
   if (mode === 'wardrobe') {
     keepPosing(buddies[editing]);
